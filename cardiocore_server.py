@@ -287,6 +287,10 @@ def shutdown(exception=None):
     """Cleanup on shutdown"""
     server_state['running'] = False
 
+@app.after_request
+def close_connection(response):
+    response.headers['Connection'] = 'close'
+    return response
 # ============ RUN SERVER ============
 
 if __name__ == '__main__':
