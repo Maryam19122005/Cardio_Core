@@ -13,6 +13,7 @@ from cardiocore_constants import Rhythm, Murmur
 
 # Model ek hi baar load hoga jab file import ho (baar baar load na ho)
 _rhythm_model = joblib.load('rhythm_model.pkl')
+_murmur_model = joblib.load('murmur_model.pkl')
 
 class AISignalProcessor:
     """Stub implementations of the 4 required functions"""
@@ -132,63 +133,47 @@ class AISignalProcessor:
     
     @staticmethod
     def classify_murmur(pcg_samples: List[int], s1_indices: List[int], 
-                       s2_indices: List[int], rhythm: Rhythm,
-                       sample_rate: int = 1000) -> Murmur:
-        """
-        Classify murmur type: none / systolic / diastolic
-        
-        Args:
-            pcg_samples: List of PCG values
-            s1_indices: Indices of S1 sounds
-            s2_indices: Indices of S2 sounds
-            rhythm: Classified rhythm (for context)
-            sample_rate: Samples per second
-        
-        Returns:
-            Murmur enum (NONE, SYSTOLIC, DIASTOLIC)
-        
-        NOTE: This is a STUB looking for energy between S1 and S2.
-        """
-        if not s1_indices or not s2_indices:
+                   s2_indices: List[int], rhythm: Rhythm,
+                   sample_rate: int = 1000) -> Murmur:
+        if not s1_indices or not s2_indices or len(s1_indices) < 2:
             return Murmur.NONE
-        
-        if len(s1_indices) == 0 or len(s2_indices) == 0:
-            return Murmur.NONE
-        
-        # Calculate power in systole (S1 to S2) and diastole (S2 to S1)
-        systolic_power = 0
-        diastolic_power = 0
-        
+
+        pcg = np.array(pcg_samples, dtype=float)
+
+        systolic_energies, diastolic_energies = [], []
         for i in range(min(len(s1_indices), len(s2_indices))):
-            s1_idx = s1_indices[i]
-            s2_idx = s2_indices[i]
-            
-            if s1_idx < s2_idx:
-                # Systolic window: S1 to S2
-                systolic_window = pcg_samples[s1_idx:s2_idx]
-                systolic_power += sum(x**2 for x in systolic_window) / len(systolic_window) if systolic_window else 0
-                
-                # Diastolic window: S2 to next S1 (estimate from next beat)
-                if i + 1 < len(s1_indices):
-                    diastolic_window = pcg_samples[s2_idx:s1_indices[i+1]]
-                    diastolic_power += sum(x**2 for x in diastolic_window) / len(diastolic_window) if diastolic_window else 0
-        
-        # Normalize
-        if systolic_power == 0 and diastolic_power == 0:
+            s1_idx, s2_idx = s1_indices[i], s2_indices[i]
+            if s1_idx < s2_idx <= len(pcg):
+                window = pcg[s1_idx:s2_idx]
+                if len(window) > 0:
+                    systolic_energies.append(np.mean(window**2))
+            if i + 1 < len(s1_indices):
+                next_s1 = s1_indices[i+1]
+                if s2_idx < next_s1 <= len(pcg):
+                    window = pcg[s2_idx:next_s1]
+                    if len(window) > 0:
+                        diastolic_energies.append(np.mean(window**2))
+
+        if not systolic_energies and not diastolic_energies:
             return Murmur.NONE
-        
-        systolic_power /= len(s1_indices) if s1_indices else 1
-        diastolic_power /= (len(s1_indices) - 1) if len(s1_indices) > 1 else 1
-        
-        # Threshold: if power is significantly above baseline, classify as murmur
-        baseline_threshold = 100  # Tune this based on real data
-        
-        if systolic_power > baseline_threshold and systolic_power > diastolic_power * 1.5:
+
+        avg_systolic = np.mean(systolic_energies) if systolic_energies else 0
+        avg_diastolic = np.mean(diastolic_energies) if diastolic_energies else 0
+        std_systolic = np.std(systolic_energies) if len(systolic_energies) > 1 else 0
+        std_diastolic = np.std(diastolic_energies) if len(diastolic_energies) > 1 else 0
+        zcr = np.mean(np.abs(np.diff(np.sign(pcg)))) / 2
+        spec_centroid = 0
+
+        feat = np.array([[avg_systolic, avg_diastolic, std_systolic, std_diastolic, zcr, spec_centroid]])
+        pred = _murmur_model.predict(feat)[0]
+
+        if pred == 'Absent':
+            return Murmur.NONE
+
+        if avg_systolic > avg_diastolic:
             return Murmur.SYSTOLIC
-        elif diastolic_power > baseline_threshold and diastolic_power > systolic_power * 1.5:
-            return Murmur.DIASTOLIC
         else:
-            return Murmur.NONE
+            return Murmur.DIASTOLIC
 
 # ============ TEST ============
 if __name__ == '__main__':
