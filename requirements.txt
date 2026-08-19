@@ -9,3 +9,4 @@ PyWavelets==1.9.0
 soundfile==0.14.0
 wfdb==4.3.1
 requests==2.34.2
+gunicorn==21.2.0 
