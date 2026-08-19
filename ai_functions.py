@@ -1,12 +1,18 @@
 """
 AI Signal Processing Functions
-These are STUBS - Maryam & Mahida will replace with real ML models
-For now: basic heuristic detection to unblock the pipeline
+Real implementations by Maryam
 """
 
-import math
+import numpy as np
+import joblib
 from typing import List, Tuple
+from scipy.signal import butter, filtfilt, iirnotch, hilbert, find_peaks
+from scipy.ndimage import uniform_filter1d
+import neurokit2 as nk
 from cardiocore_constants import Rhythm, Murmur
+
+# Model ek hi baar load hoga jab file import ho (baar baar load na ho)
+_rhythm_model = joblib.load('rhythm_model.pkl')
 
 class AISignalProcessor:
     """Stub implementations of the 4 required functions"""
@@ -14,134 +20,115 @@ class AISignalProcessor:
     @staticmethod
     def detect_rpeaks(ecg_samples: List[int], sample_rate: int = 1000) -> List[int]:
         """
-        Detect R-peaks in ECG signal.
-        
-        Args:
-            ecg_samples: List of ECG values
-            sample_rate: Samples per second
-        
-        Returns:
-            List of indices where R-peaks occur
-        
-        NOTE: This is a STUB using simple peak detection.
-              Maryam & Mahida will replace with Pan-Tompkins or neurokit2.
+        Detect R-peaks in ECG signal using neurokit2 (Pan-Tompkins based).
+        Returns: list of sample indices where R-peaks occur
         """
-        if len(ecg_samples) < 3:
+        if len(ecg_samples) < 10:
             return []
         
-        r_peaks = []
+        ecg = np.array(ecg_samples, dtype=float)
         
-        # Simple peak detection: find local maxima
-        threshold = max(ecg_samples) * 0.7  # 70% of max
+        # Denoise: bandpass + notch filter
+        nyquist = sample_rate / 2
+        low = 0.5 / nyquist
+        high = min(40 / nyquist, 0.99)   # ECG_HIGHCUT = 40 (constants file se)
+        b, a = butter(4, [low, high], btype='band')
+        filtered = filtfilt(b, a, ecg)
         
-        for i in range(1, len(ecg_samples) - 1):
-            if (ecg_samples[i] > threshold and 
-                ecg_samples[i] > ecg_samples[i-1] and 
-                ecg_samples[i] > ecg_samples[i+1]):
-                r_peaks.append(i)
+        notch_freq = 50 / nyquist
+        if notch_freq < 1.0:
+            b_notch, a_notch = iirnotch(50, Q=30, fs=sample_rate)
+            filtered = filtfilt(b_notch, a_notch, filtered)
         
-        # Filter: R-peaks should be at least 400ms apart (min 0.4s at 1000 SPS = 400 samples)
-        filtered_peaks = []
-        for peak in r_peaks:
-            if not filtered_peaks or peak - filtered_peaks[-1] >= 400:
-                filtered_peaks.append(peak)
-        
-        return filtered_peaks
+        try:
+            signals, info = nk.ecg_process(filtered, sampling_rate=sample_rate)
+            r_peak_samples = info['ECG_R_Peaks']
+            return [int(i) for i in r_peak_samples]
+        except Exception:
+            return []  # bohot chhota/noisy signal ho to crash na ho
     
     @staticmethod
     def segment_s1s2(pcg_samples: List[int], r_peak_indices: List[int], 
-                     sample_rate: int = 1000) -> Tuple[List[int], List[int]]:
+                    sample_rate: int = 1000) -> Tuple[List[int], List[int]]:
         """
-        Detect S1 and S2 heart sounds using R-peak timing as reference.
-        
-        Args:
-            pcg_samples: List of PCG (heart sound) values
-            r_peak_indices: Indices of detected R-peaks from ECG
-            sample_rate: Samples per second
-        
-        Returns:
-            (s1_indices, s2_indices): Lists of detected S1 and S2 times
-        
-        NOTE: This is a STUB. Real version will use spectrograms + segmentation.
+        Detect S1/S2 using envelope + peak detection (independent of R-peaks,
+        r_peak_indices signature ke liye rakha hai lekin filhal use nahi ho raha).
+        Returns: (s1_indices, s2_indices) — sample indices
         """
-        if len(pcg_samples) < 100 or not r_peak_indices:
+        if len(pcg_samples) < 100:
             return [], []
         
-        s1_indices = []
-        s2_indices = []
+        pcg = np.array(pcg_samples, dtype=float)
         
-        # For each detected R-peak, predict S1 and S2 timing
-        for r_idx in r_peak_indices:
-            # S1 occurs 50-150ms after R-peak
-            s1_search_start = r_idx + int(0.05 * sample_rate)  # 50ms
-            s1_search_end = r_idx + int(0.15 * sample_rate)    # 150ms
-            
-            if s1_search_end < len(pcg_samples):
-                # Find loudest point (max absolute value) in S1 window
-                s1_window = pcg_samples[s1_search_start:s1_search_end]
-                if s1_window:
-                    s1_rel_idx = max(range(len(s1_window)), 
-                                    key=lambda i: abs(s1_window[i]))
-                    s1_indices.append(s1_search_start + s1_rel_idx)
-            
-            # S2 occurs 350-650ms after S1 (or 400-800ms after R)
-            s2_search_start = r_idx + int(0.4 * sample_rate)   # 400ms
-            s2_search_end = r_idx + int(0.8 * sample_rate)     # 800ms
-            
-            if s2_search_end < len(pcg_samples):
-                # Find loudest point in S2 window
-                s2_window = pcg_samples[s2_search_start:s2_search_end]
-                if s2_window:
-                    s2_rel_idx = max(range(len(s2_window)), 
-                                    key=lambda i: abs(s2_window[i]))
-                    s2_indices.append(s2_search_start + s2_rel_idx)
+        # Envelope banao
+        nyquist = sample_rate / 2
+        low = 25 / nyquist
+        high = min(200 / nyquist, 0.99)
+        b, a = butter(4, [low, high], btype='band')
+        filtered = filtfilt(b, a, pcg)
+        envelope = np.abs(hilbert(filtered))
+        envelope = uniform_filter1d(envelope, size=max(1, int(0.02 * sample_rate)))
+        
+        # Peaks dhoondo
+        peaks, _ = find_peaks(envelope, distance=int(0.08*sample_rate), prominence=0.015)
+        
+        if len(peaks) < 2:
+            return [], []
+        
+        # Gaps ka threshold (clustering-based)
+        gaps = np.diff(peaks) / sample_rate
+        if len(gaps) >= 2:
+            sorted_gaps = np.sort(gaps)
+            diffs = np.diff(sorted_gaps)
+            split_idx = np.argmax(diffs)
+            threshold = (sorted_gaps[split_idx] + sorted_gaps[split_idx + 1]) / 2
+        else:
+            threshold = np.median(gaps)
+        
+        # Amplitude se decide karo pehla peak S1 hai ya S2 (S1 = lower amplitude)
+        amps = envelope[peaks]
+        labels = ['S1'] if amps[0] < amps[1] else ['S2']
+        for i in range(len(gaps)):
+            prev_label = labels[-1]
+            next_label = 'S2' if prev_label == 'S1' else 'S1'
+            labels.append(next_label)
+        
+        s1_indices = [int(p) for p, l in zip(peaks, labels) if l == 'S1']
+        s2_indices = [int(p) for p, l in zip(peaks, labels) if l == 'S2']
         
         return s1_indices, s2_indices
     
     @staticmethod
     def classify_rhythm(ecg_samples: List[int], r_peak_indices: List[int], 
-                       sample_rate: int = 1000) -> Rhythm:
+                    sample_rate: int = 1000) -> Rhythm:
         """
-        Classify heart rhythm: normal / brady / tachy / AF
-        
-        Args:
-            ecg_samples: List of ECG values
-            r_peak_indices: Indices of detected R-peaks
-            sample_rate: Samples per second
-        
-        Returns:
-            Rhythm enum (NORMAL, BRADY, TACHY, AF)
-        
-        NOTE: This is a STUB using simple HR calculation.
+        Classify rhythm using trained Random Forest model.
         """
-        if len(r_peak_indices) < 2:
-            return Rhythm.NORMAL
+        if len(r_peak_indices) < 3:
+            return Rhythm.NORMAL  # not enough data, safe default
         
-        # Calculate heart rate from R-R intervals
-        rr_intervals = []
-        for i in range(1, len(r_peak_indices)):
-            interval_samples = r_peak_indices[i] - r_peak_indices[i-1]
-            interval_ms = (interval_samples / sample_rate) * 1000
-            rr_intervals.append(interval_ms)
+        # RR intervals nikalo (seconds me)
+        rr_intervals = np.diff(r_peak_indices) / sample_rate
         
-        if not rr_intervals:
-            return Rhythm.NORMAL
+        avg_hr = 60 / np.mean(rr_intervals)
+        rr_std = np.std(rr_intervals)
+        rr_min = np.min(rr_intervals)
+        rr_max = np.max(rr_intervals)
+        rr_range = rr_max - rr_min
+        rmssd = np.sqrt(np.mean(np.diff(rr_intervals) ** 2)) if len(rr_intervals) > 1 else 0.0
         
-        avg_rr_ms = sum(rr_intervals) / len(rr_intervals)
-        bpm = 60000 / avg_rr_ms  # Convert ms to BPM
+        feat = np.array([[avg_hr, rr_std, rr_min, rr_max, rr_range, rmssd]])
         
-        # Check for irregular rhythm (AF)
-        rr_std = (sum((x - avg_rr_ms)**2 for x in rr_intervals) / len(rr_intervals)) ** 0.5
-        irregularity = rr_std / avg_rr_ms  # Coefficient of variation
+        label = _rhythm_model.predict(feat)[0]  # string: 'normal'/'brady'/'tachy'/'afib'
         
-        if irregularity > 0.15:  # >15% variation = AF
-            return Rhythm.AF
-        elif bpm < 60:
-            return Rhythm.BRADY
-        elif bpm > 100:
-            return Rhythm.TACHY
-        else:
-            return Rhythm.NORMAL
+        # Model ka string label ko Rhythm enum me convert karo
+        label_map = {
+            'normal': Rhythm.NORMAL,
+            'brady': Rhythm.BRADY,
+            'tachy': Rhythm.TACHY,
+            'afib': Rhythm.AF
+        }
+        return label_map.get(label, Rhythm.NORMAL)
     
     @staticmethod
     def classify_murmur(pcg_samples: List[int], s1_indices: List[int], 
