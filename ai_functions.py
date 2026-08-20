@@ -32,7 +32,7 @@ class AISignalProcessor:
         # Denoise: bandpass + notch filter
         nyquist = sample_rate / 2
         low = 0.5 / nyquist
-        high = min(40 / nyquist, 0.99)   # ECG_HIGHCUT = 40 (constants file se)
+        high = min(150 / nyquist, 0.99)   # ECG_HIGHCUT = 40 (constants file se)
         b, a = butter(4, [low, high], btype='band')
         filtered = filtfilt(b, a, ecg)
         
