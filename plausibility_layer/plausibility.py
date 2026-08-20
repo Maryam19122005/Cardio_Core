@@ -6,8 +6,8 @@ Validates cardiac events against Truth Sheet literature
 
 from typing import Optional, List, Dict, Tuple
 import math
-from constants import *
-from schema import *
+from .constants import *
+from .schema import *
 
 class PlausibilityValidator:
     """
