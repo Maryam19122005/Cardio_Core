@@ -42,11 +42,12 @@ class AISignalProcessor:
             filtered = filtfilt(b_notch, a_notch, filtered)
         
         try:
-            signals, info = nk.ecg_process(filtered, sampling_rate=sample_rate)
+            signals, info = nk.ecg_peaks(filtered, sampling_rate=sample_rate)
             r_peak_samples = info['ECG_R_Peaks']
             return [int(i) for i in r_peak_samples]
-        except Exception:
-            return []  # bohot chhota/noisy signal ho to crash na ho
+        except Exception as e:
+            print(f"detect_rpeaks failed: {e}")
+        return []  # bohot chhota/noisy signal ho to crash na ho
     
     @staticmethod
     def segment_s1s2(pcg_samples: List[int], r_peak_indices: List[int], 
