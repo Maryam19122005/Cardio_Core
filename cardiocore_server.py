@@ -7,6 +7,8 @@ Handles mock data, real ESP32 streams, and demo modes
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from serial_reader import HardwareSerialReader
+from cardiocore_constants import SAMPLE_RATE
+from twin_contract import TwinContractAdapter
 import threading
 import time
 import json
@@ -25,6 +27,7 @@ CORS(app)
 engine = CardioFusionEngine()
 mock_gen = MockDataGenerator(bpm=72, rhythm=Rhythm.NORMAL, murmur=Murmur.NONE)
 data_lock = threading.Lock()
+twin_adapter = TwinContractAdapter(sample_rate=SAMPLE_RATE)
 
 # ============ HARDWARE CONNECTION ============
 # TODO: set this to the real COM port shown in Device Manager for your ESP32
@@ -112,7 +115,8 @@ def get_data():
             }), 202  # Accepted but not ready
 
         state = server_state['last_state']
-        return jsonify(state.to_dict()), 200
+        payload = twin_adapter.build(state, engine.buffers)
+    return jsonify(payload), 200
 
 @app.route('/status', methods=['GET'])
 def get_status():
