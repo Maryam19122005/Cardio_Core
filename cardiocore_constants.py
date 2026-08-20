@@ -89,6 +89,15 @@ class TwinState:
     ecg_confidence: float
     pcg_confidence: float
 
+
+    overall_valid: bool = True
+    overall_confidence: float = 1.0
+    caution_mode: bool = False
+    caution_reason: str = ""
+
+    
+
+
     def to_dict(self):
         """Convert to JSON-serializable dict"""
         return {
@@ -107,4 +116,12 @@ class TwinState:
             'lead_off': self.lead_off,
             'ecg_confidence': round(self.ecg_confidence, 3),
             'pcg_confidence': round(self.pcg_confidence, 3),
+
+            'overall_valid': self.overall_valid,
+            'overall_confidence': round(self.overall_confidence, 3),
+            'caution_mode': self.caution_mode,
+            'caution_reason': self.caution_reason,
+
+
         }
+

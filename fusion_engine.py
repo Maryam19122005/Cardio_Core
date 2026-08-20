@@ -12,6 +12,15 @@ from cardiocore_constants import (
 from signal_buffers import SensorBuffers
 from ai_functions import AISignalProcessor
 
+from plausibility_layer import PlausibilityValidator, ClassificationOutput
+
+_RHYTHM_LABEL_MAP = {
+    "normal": "normal",
+    "brady": "bradycardia",
+    "tachy": "tachycardia",
+    "afib": "afib",
+}
+
 class CardioFusionEngine:
     """
     Main processing engine:
@@ -31,11 +40,26 @@ class CardioFusionEngine:
         self.current_bpm = 72
         self.current_rhythm = Rhythm.NORMAL
         self.current_murmur = Murmur.NONE
+        self.validator = PlausibilityValidator()
+        self.beat_counter = 0
+        self.current_verdict = None
         
         # For low-latency detection
         self.last_detection_frame = -1
         self.detection_interval_frames = 10  # Run AI every 10 frames (100ms)
-        
+
+    def _verdict_fields(self) -> dict:
+        if self.current_verdict is None:
+            return dict(overall_valid=True, overall_confidence=1.0,
+                        caution_mode=False, caution_reason="")
+        v = self.current_verdict
+        return dict(
+            overall_valid=v.overall_valid,
+            overall_confidence=v.overall_confidence,
+            caution_mode=not v.overall_valid,
+            caution_reason=v.summary if not v.overall_valid else "",
+        )
+
     def process_frame(self, frame: Frame) -> Optional[TwinState]:
         """
         Process one sensor frame and return updated TwinState
@@ -76,6 +100,7 @@ class CardioFusionEngine:
             cardiac_phase=cardiac_phase,
             systole_phase=systole_phase,
             diastole_phase=diastole_phase,
+            **self._verdict_fields(),
             rhythm=self.current_rhythm,
             murmur=self.current_murmur,
             lead_off=False,  # Will add sensor check later
@@ -137,6 +162,20 @@ class CardioFusionEngine:
             pcg_data, s1_indices, s2_indices, self.current_rhythm
         )
     
+
+        self.beat_counter += 1
+        cycle = ClassificationOutput(
+            beat_index=self.beat_counter,
+            r_peak_ms=self.last_r_peak_time_ms,
+            s1_ms=self.last_s1_time_ms if self.last_s1_time_ms >= 0 else None,
+            s2_ms=self.last_s2_time_ms if self.last_s2_time_ms >= 0 else None,
+            heart_rate_bpm=self.current_bpm,
+            rhythm_label=_RHYTHM_LABEL_MAP.get(self.current_rhythm.value, "normal"),
+            murmur_label=self.current_murmur.value,
+            raw_confidence=0.9,
+        )
+        self.current_verdict = self.validator.validate_cycle(cycle)
+
     def _calculate_bpm(self, r_peak_indices, ecg_data) -> int:
         """Calculate BPM from R-R intervals"""
         if len(r_peak_indices) < 2:
@@ -215,6 +254,7 @@ class CardioFusionEngine:
             cardiac_phase=self._compute_phases(self.buffers.latest_timestamp_ms)[0],
             systole_phase=self._compute_phases(self.buffers.latest_timestamp_ms)[1],
             diastole_phase=self._compute_phases(self.buffers.latest_timestamp_ms)[2],
+            **self._verdict_fields(),
             rhythm=self.current_rhythm,
             murmur=self.current_murmur,
             lead_off=False,
