@@ -6,6 +6,7 @@ Handles mock data, real ESP32 streams, and demo modes
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from serial_reader import HardwareSerialReader
 import threading
 import time
 import json
@@ -25,6 +26,12 @@ engine = CardioFusionEngine()
 mock_gen = MockDataGenerator(bpm=72, rhythm=Rhythm.NORMAL, murmur=Murmur.NONE)
 data_lock = threading.Lock()
 
+# ============ HARDWARE CONNECTION ============
+# TODO: set this to the real COM port shown in Device Manager for your ESP32
+# (Ports > Silicon Labs CP210x / USB-SERIAL CH340, etc). 'COM3' is a placeholder.
+hw_reader = HardwareSerialReader(port='COM3', baudrate=115200)
+hw_reader.connect()
+
 # Server state
 server_state = {
     'mode': 'mock',  # 'mock' or 'live'
@@ -35,6 +42,9 @@ server_state = {
     'error_count': 0,
     'demo_rhythm': Rhythm.NORMAL,
     'demo_murmur': Murmur.NONE,
+    'data_source': 'mock',  # tracks whether the last frame was really 'live'
+                             # hardware or a 'mock' fallback -- check this in
+                             # /debug to confirm the connection is actually real
 }
 
 # ============ BACKGROUND DATA GENERATION ============
@@ -43,8 +53,6 @@ def data_generation_thread():
     Background thread continuously generates/processes frames
     Updates shared state
     """
-    frame_count = 0
-    
     while server_state['running']:
         try:
             # Generate frame based on mode
@@ -53,23 +61,30 @@ def data_generation_thread():
                 mock_gen.rhythm = server_state['demo_rhythm']
                 mock_gen.murmur = server_state['demo_murmur']
                 frame = mock_gen.generate_frame()
+                source = 'mock'
             else:
-                # In live mode, would read from serial here
-                # For now, continue using mock
-                frame = mock_gen.generate_frame()
-            
+                # Live mode: read from the real ESP32 over serial.
+                # read_frame() automatically falls back to mock data if the
+                # hardware isn't connected or a read fails -- check
+                # server_state['data_source'] via /debug to see which one
+                # actually happened for the last frame.
+                frame, source = hw_reader.read_frame()
+
+            with data_lock:
+                server_state['data_source'] = source
+
             # Process frame through fusion engine
             twin_state = engine.process_frame(frame)
-            
+
             if twin_state:
                 with data_lock:
                     server_state['last_state'] = twin_state
                     server_state['last_update_ms'] = int(time.time() * 1000)
                     server_state['frame_count'] += 1
-            
+
             # Sleep to maintain 10ms frame interval (100 frames/sec)
             time.sleep(0.01)
-            
+
         except Exception as e:
             with data_lock:
                 server_state['error_count'] += 1
@@ -88,21 +103,6 @@ def get_data():
     """
     Main endpoint: returns current cardiac state
     Called by Unity app (likely 30-60 Hz)
-    
-    Response format (JSON):
-    {
-        'timestamp_ms': int,
-        'ecg': float,
-        'pcg': float,
-        'bpm': int,
-        'cardiac_phase': float (0.0-1.0),
-        'systole_phase': float,
-        'diastole_phase': float,
-        'rhythm': str,
-        'murmur': str,
-        'lead_off': bool,
-        ...
-    }
     """
     with data_lock:
         if server_state['last_state'] is None:
@@ -110,7 +110,7 @@ def get_data():
                 'error': 'No data available yet',
                 'uptime_ms': int(time.time() * 1000)
             }), 202  # Accepted but not ready
-        
+
         state = server_state['last_state']
         return jsonify(state.to_dict()), 200
 
@@ -123,6 +123,7 @@ def get_status():
         uptime = int(time.time() * 1000) - server_state['last_update_ms']
         return jsonify({
             'mode': server_state['mode'],
+            'data_source': server_state['data_source'],
             'running': server_state['running'],
             'frames_processed': server_state['frame_count'],
             'errors': server_state['error_count'],
@@ -135,7 +136,7 @@ def get_status():
 def command():
     """
     Control server behavior
-    
+
     POST body:
     {
         'action': str,  # 'set_rhythm', 'set_murmur', 'switch_mode'
@@ -145,7 +146,7 @@ def command():
     data = request.get_json()
     action = data.get('action', '')
     value = data.get('value', '')
-    
+
     try:
         with data_lock:
             if action == 'set_rhythm':
@@ -160,7 +161,7 @@ def command():
                     'success': False,
                     'message': f'Unknown rhythm: {value}'
                 }), 400
-            
+
             elif action == 'set_murmur':
                 for murmur in Murmur:
                     if murmur.value == value:
@@ -173,7 +174,7 @@ def command():
                     'success': False,
                     'message': f'Unknown murmur: {value}'
                 }), 400
-            
+
             elif action == 'switch_mode':
                 if value in ['mock', 'live']:
                     server_state['mode'] = value
@@ -185,13 +186,13 @@ def command():
                     'success': False,
                     'message': f'Unknown mode: {value}'
                 }), 400
-            
+
             else:
                 return jsonify({
                     'success': False,
                     'message': f'Unknown action: {action}'
                 }), 400
-    
+
     except Exception as e:
         return jsonify({
             'success': False,
@@ -203,42 +204,47 @@ def upload_frame():
     """
     Accept raw binary frames from ESP32 (future use)
     POST body: raw binary (46 bytes per frame)
+
+    NOTE: this is the OLD 46-byte format (ECG+PCG, signed 16-bit) from the
+    original design. Your actual hardware uses a different 26-byte
+    ECG-only format handled by serial_reader.py instead. This endpoint is
+    left as-is in case a networked (WiFi) upload path is ever added later,
+    but it does NOT match the current USB-serial hardware protocol.
     """
     try:
         binary_data = request.data
-        
+
         if len(binary_data) != 46:
             return jsonify({
                 'success': False,
                 'message': f'Expected 46 bytes, got {len(binary_data)}'
             }), 400
-        
+
         frame = FrameParser.unpack_frame(binary_data)
         if frame is None:
             return jsonify({
                 'success': False,
                 'message': 'Failed to parse frame'
             }), 400
-        
+
         valid, msg = FrameParser.validate_frame(frame)
         if not valid:
             return jsonify({
                 'success': False,
                 'message': f'Frame validation failed: {msg}'
             }), 400
-        
-        # Process frame
+
         twin_state = engine.process_frame(frame)
-        
+
         with data_lock:
             server_state['last_state'] = twin_state
             server_state['frame_count'] += 1
-        
+
         return jsonify({
             'success': True,
             'frame_number': frame.frame_number
         }), 200
-    
+
     except Exception as e:
         with data_lock:
             server_state['error_count'] += 1
@@ -253,7 +259,7 @@ def debug():
     with data_lock:
         if server_state['last_state'] is None:
             return jsonify({'error': 'No data'}), 202
-        
+
         state = server_state['last_state']
         return jsonify({
             'timestamp_ms': state.timestamp_ms,
@@ -273,6 +279,7 @@ def debug():
             'pcg_confidence': round(state.pcg_confidence, 3),
             'server_frames_processed': server_state['frame_count'],
             'server_mode': server_state['mode'],
+            'data_source': server_state['data_source'],  # 'live' or 'mock' -- check this!
         }), 200
 
 # ============ APP STARTUP/SHUTDOWN ============
@@ -291,6 +298,7 @@ def shutdown(exception=None):
 def close_connection(response):
     response.headers['Connection'] = 'close'
     return response
+
 # ============ RUN SERVER ============
 
 if __name__ == '__main__':
@@ -301,11 +309,11 @@ if __name__ == '__main__':
     print("  GET  /data              - Latest cardiac state (for Unity)")
     print("  GET  /status            - Server health")
     print("  POST /command           - Control (set_rhythm, set_murmur, etc)")
-    print("  POST /upload_frame      - Upload binary frame (ESP32)")
+    print("  POST /upload_frame      - Upload binary frame (legacy 46-byte format)")
     print("  GET  /debug             - Verbose state (development)")
     print("\nStarting server on http://0.0.0.0:5000")
     print("="*60 + "\n")
-    
+
     app.run(
         host='0.0.0.0',
         port=5000,
